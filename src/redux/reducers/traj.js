@@ -1,7 +1,7 @@
 const initState = {
   tripsinfo: {
     trips: [],        // 轨迹
-    loopLength: 7200, // 循环时长（秒）
+    loopLength: 86400, // 循环时长（秒）
     starttime: 0      // 开始时间（秒）
   },
   play: false,

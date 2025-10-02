@@ -1,18 +1,18 @@
 /* global window */
 import React, { useState, useEffect, useCallback } from 'react';
-import { _MapContext as MapContext, StaticMap, NavigationControl, ScaleControl, FlyToInterpolator } from 'react-map-gl';
+import { _MapContext as MapContext, StaticMap, NavigationControl, ScaleControl } from 'react-map-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import DeckGL from '@deck.gl/react';
-import { useSubscribe, usePublish, useUnsubscribe } from '@/utils/usePubSub';
-import { useInterval } from 'ahooks';
-import { AmbientLight, LightingEffect, MapView, FirstPersonView, _SunLight as SunLight } from '@deck.gl/core';
-import { BitmapLayer, IconLayer } from '@deck.gl/layers';
-import { TileLayer, TripsLayer } from '@deck.gl/geo-layers';
+import { useSubscribe, useUnsubscribe } from '@/utils/usePubSub';
+import { AmbientLight, LightingEffect, MapView, _SunLight as SunLight } from '@deck.gl/core';
+import { ScatterplotLayer } from '@deck.gl/layers';
+import { TripsLayer } from '@deck.gl/geo-layers';
 import { NodeIndexOutlined } from '@ant-design/icons';
 
 // 贴路工具
 import { segmentsFromGeoJSON, simulateTripsOnRoads } from '../../utils/roadSimLite';
+// 红绿灯工具（注意：复数 signals）
+import { loadSignalsGeoJSON, buildSignalMapForNodes, isRedAt } from '../../utils/signal';
 
 // redux
 import { useDispatch, useMappedState } from 'redux-react-hook';
@@ -34,10 +34,8 @@ const MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoibmkxbzEiLCJhIjoiY2t3ZDgzMmR5NDF4czJ1cm84
 
 export default function Deckmap() {
   const unsubscribe = useUnsubscribe();
-  const [ismount, setismount] = useState(false);
-  useEffect(() => { setismount(true); }, []);
 
-  // -------- redux 取值 --------
+  // -------- redux --------
   const mapState = useCallback(state => ({ traj: state.traj }), []);
   const { traj } = useMappedState(mapState);
   const { tripsinfo, play, trajlight_isshow, trajColor1, trajColor2, trailLength, trajwidth } = traj;
@@ -53,15 +51,9 @@ export default function Deckmap() {
   const settrajwidth = (data) => dispatch(settrajwidth_tmp(data));
   const setTimelineval = (data) => dispatch(setTimelineval_tmp(data));
 
-  // -------- 底图/光照 --------
-  const [lightintensity, setlightintensity] = useState(2);
-  unsubscribe('lightintensity');
-  useSubscribe('lightintensity', (_, data) => setlightintensity(data));
-
-  const [lightx, setlightx] = useState(1554937300); // 秒
-  unsubscribe('lightx');
-  useSubscribe('lightx', (_, data) => setlightx(data));
-
+  // -------- 光照 --------
+  const [lightintensity] = useState(2);
+  const [lightx] = useState(1554937300);
   const ambientLight = new AmbientLight({ color: [255, 255, 255], intensity: 1.0 });
   const sunLight = new SunLight({
     timestamp: lightx > 1e12 ? lightx : lightx * 1000,
@@ -79,39 +71,8 @@ export default function Deckmap() {
     pitch: 45,
     bearing: 0
   });
-
   const [mapStyle, setMapStyle] = useState('dark-v9');
   useSubscribe('mapstyle', (_, data) => setMapStyle(data));
-
-  useEffect(() => {
-    const el = document.getElementById('deckgl-wrapper');
-    if (!el) return;
-    const handler = (evt) => evt.preventDefault();
-    el.addEventListener('contextmenu', handler);
-    return () => el.removeEventListener('contextmenu', handler);
-  }, []);
-
-  // -------- 旋转控件 --------
-  function rotate(pitch, bearing, duration) {
-    setViewState(v => ({
-      ...v,
-      pitch, bearing,
-      transitionDuration: duration,
-      transitionInterpolator: new FlyToInterpolator()
-    }));
-  }
-  const [angle, setangle] = useState(120);
-  const [interval, setInterval] = useState(undefined);
-  useInterval(() => {
-    rotate(viewState.pitch, angle, 2000);
-    setangle(a => a + 30);
-  }, interval, { immediate: true });
-
-  function rotatecam() {
-    setangle(viewState.bearing + 30);
-    if (interval !== 2000) setInterval(2000);
-    else { setInterval(undefined); setViewState(viewState); }
-  }
 
   // -------- 时间动画（秒）--------
   const [animation] = useState({});
@@ -132,36 +93,65 @@ export default function Deckmap() {
       return (t + animationSpeed) % tripsinfo.loopLength;
     });
   };
-
   unsubscribe('playtime');
   useSubscribe('playtime', (_, data) => {
     if (!tripsinfo || !tripsinfo.loopLength) return;
     setTime_here(tripsinfo.loopLength * data / 100);
   });
-
   useEffect(() => {
     if (play) animation.id = window.requestAnimationFrame(animate);
     return () => window.cancelAnimationFrame(animation.id);
   });
 
-  // -------- 路网 & 贴路生成 --------
+  // -------- 路网 & 信号 --------
   const [roadSegs, setRoadSegs] = useState([]);
-  const [numCars, setNumCars] = useState(1200); // 可随时改
+  const [signalMap, setSignalMap] = useState(null);
+  const [signalPositions, setSignalPositions] = useState([]);
+  const [numCars, setNumCars] = useState(1200);
   const [durationSec, setDurationSec] = useState(360);
 
-  // 只加载一次 GeoJSON
+  // 生成 key 的兜底函数（确保节点不会变成 1 个）
+  const toKey = p => Array.isArray(p) ? `${p[0].toFixed(6)},${p[1].toFixed(6)}` : '';
+
+  // 只加载一次
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const res = await fetch('/oise-roads.geojson');
-        const gj = await res.json();
-        const segs = segmentsFromGeoJSON(gj);
+        // 1) 道路
+        const roadsRes = await fetch('/oise-roads.geojson');
+        const roadsGj = await roadsRes.json();
+        const segs = segmentsFromGeoJSON(roadsGj);
         if (!mounted) return;
-        console.log('road segments =', segs.length);
         setRoadSegs(segs);
-        // 初次生成
-        regenerate(segs, numCars, durationSec);
+
+        // 2) 节点列表（兜底生成 key）
+        const nodeMap = new Map();
+        for (const s of segs) {
+          const aKey = s.aKey || toKey(s.a);
+          const bKey = s.bKey || toKey(s.b);
+          if (aKey && !nodeMap.has(aKey)) nodeMap.set(aKey, { id: aKey, coord: s.a });
+          if (bKey && !nodeMap.has(bKey)) nodeMap.set(bKey, { id: bKey, coord: s.b });
+        }
+        const nodes = Array.from(nodeMap.values());
+
+        // 3) 红绿灯
+        let sigMap = null, sigPos = [];
+        try {
+          const sgj = await loadSignalsGeoJSON('/oise-signals.geojson');
+          const built = buildSignalMapForNodes(nodes, sgj, 120); // 吸附半径放大到 120m 更容易命中
+          sigMap = built.signalMap;
+          sigPos = built.signalPositions;
+        } catch (e) {
+          console.warn('未找到 oise-signals.geojson，红绿灯为空');
+        }
+        if (!mounted) return;
+        setSignalMap(sigMap);
+        setSignalPositions(sigPos);
+
+        // 4) 初始生成
+        regenerate(segs, numCars, durationSec, sigMap);
+        console.log('路段=', segs.length, '节点=', nodes.length, '匹配信号路口=', sigPos.length, 'signalMap size=', sigMap ? sigMap.size : 0);
       } catch (e) {
         console.error('加载 oise-roads.geojson 失败：', e);
       }
@@ -171,22 +161,16 @@ export default function Deckmap() {
   }, []);
 
   // 生成/重算
-  const regenerate = useCallback((segs = roadSegs, carN = numCars, dur = durationSec) => {
+  const regenerate = useCallback((segs = roadSegs, carN = numCars, dur = durationSec, sigMapParam = signalMap) => {
     if (!segs || segs.length === 0) return;
     const synth = simulateTripsOnRoads({
       segs,
       numCars: carN,
       durationSec: dur,
-      stepSec: 1
+      stepSec: 1,
+      signalMap: sigMapParam,
+      isRedAt
     });
-
-    // 打点自检
-    const f = synth.trips?.[0];
-    if (f) {
-      console.log('coords len =', f.geometry.coordinates.length,
-                  'timestamps len =', f.properties.timestamp.length,
-                  'loopLength =', synth.loopLength);
-    }
 
     setTripsinfo({
       trips: synth.trips,
@@ -200,18 +184,23 @@ export default function Deckmap() {
       const [lng, lat] = synth.trips[0].geometry.coordinates[0];
       setViewState(v => ({ ...v, longitude: lng, latitude: lat, zoom: 10 }));
     }
-  }, [roadSegs, numCars, durationSec, setTripsinfo, setPlay, setshowplayinfo]);
+  }, [roadSegs, numCars, durationSec, signalMap, setTripsinfo, setPlay, setshowplayinfo]);
+// 轨迹显隐开关（默认显示）
+ const [trajlayer_isshow, settrajlayer_isshow] = useState(true);
 
   // -------- 图层 --------
-  const [trajlayer_isshow, settrajlayer_isshow] = useState(true);
-
-  const layerTools = (
-    <div className="mapboxgl-ctrl-group mapboxgl-ctrl">
-      <button title="trajcontrol" onClick={() => settrajlayer_isshow(s => !s)} style={{ opacity: trajlayer_isshow ? 1 : 0.2 }}>
-        <NodeIndexOutlined />
-      </button>
-    </div>
-  );
+  // 用红点显示红绿灯位置
+  const signalsLayer = new ScatterplotLayer({
+    id: 'traffic-signals-red-dots',
+    data: signalPositions,                 // [{ id, coord:[lng,lat] }]
+    getPosition: d => d.coord,
+    radiusUnits: 'meters',
+    getRadius: () => 8,                   // 20 米半径
+    radiusMinPixels: 3,                    // 最小像素半径，避免太小看不见
+    getFillColor: [255, 0, 0, 230],        // 红色
+    pickable: false,
+    visible: true
+  });
 
   const layers = [
     new TripsLayer({
@@ -223,9 +212,9 @@ export default function Deckmap() {
       opacity: 0.8,
       widthMinPixels: Math.max(1, trajwidth || 1),
       trailLength: Math.max(10, trailLength || 60),
-      currentTime: time_here,                    // 秒
+      currentTime: time_here, // 秒
       shadowEnabled: false,
-      visible: trajlayer_isshow
+      visible: true
     }),
     trajlayer_isshow && trajlight_isshow ? new TripsLayer({
       id: 'trips-glow',
@@ -238,32 +227,11 @@ export default function Deckmap() {
       trailLength: Math.max(10, trailLength || 60),
       currentTime: time_here,
       shadowEnabled: false
-    }) : null
+    }) : null,
+    signalsLayer
   ].filter(Boolean);
 
-  // -------- 渲染 --------
-  const minimapBackgroundStyle = {
-    position: 'absolute', zIndex: -1, width: '100%', height: '100%',
-    background: '#aaa', boxShadow: '0 0 8px 2px rgba(0,0,0,0.15)'
-  };
-
-  const onViewStateChange = (evt) => {
-    const { viewId, viewState: vs } = evt;
-    if (viewId === 'firstPerson') {
-      setViewState(v => ({ ...v, longitude: vs.longitude, latitude: vs.latitude, bearing: vs.bearing }));
-    } else if (viewId === 'baseMap') {
-      setViewState(v => ({
-        ...v,
-        longitude: vs.longitude,
-        latitude: vs.latitude,
-        pitch: vs.pitch,
-        bearing: vs.bearing,
-        zoom: vs.zoom
-      }));
-    }
-  };
-
-  // 顶部右侧：车辆数量/时长 控件
+  // -------- 控件 --------
   const Controls = (
     <div className="mapboxgl-ctrl mapboxgl-ctrl-group" style={{ display: 'flex', gap: 8, padding: 8 }}>
       <label style={{ padding: '4px 6px' }}>
@@ -291,17 +259,13 @@ export default function Deckmap() {
   return (
     <DeckGL
       layers={layers}
-      initialViewState={{
-        baseMap: viewState,
-        firstPerson: { ...viewState, pitch: 0, zoom: 0, position: [0, 0, 2], transitionDuration: undefined, transitionInterpolator: undefined }
-      }}
+      initialViewState={viewState}
       effects={theme.effects}
       controller={{ doubleClickZoom: false, inertia: true, touchRotate: true }}
       style={{ zIndex: 0 }}
       ContextProvider={MapContext.Provider}
-      onViewStateChange={onViewStateChange}
     >
-      <MapView id="baseMap" controller={true} y="0%" height="100%" position={[0, 0, 0]}>
+      <MapView id="baseMap" controller={true} height="100%">
         <StaticMap
           reuseMaps
           mapboxApiAccessToken={MAPBOX_ACCESS_TOKEN}
@@ -316,25 +280,13 @@ export default function Deckmap() {
 
         <div className='mapboxgl-ctrl-bottom-right' style={{ bottom: '80px' }}>
           <NavigationControl onViewportChange={viewport => setViewState(viewport)} />
-         
-          {layerTools}
-        
+          <div className="mapboxgl-ctrl-group mapboxgl-ctrl">
+            <button title="trajcontrol" onClick={() => {}} style={{ opacity: 1 }}>
+              <NodeIndexOutlined />
+            </button>
+          </div>
         </div>
       </MapView>
-
-      {/* <FirstPersonView
-        id="firstPerson"
-        controller={{ scrollZoom: false, dragRotate: true, inertia: true }}
-        far={10000}
-        focalDistance={1.5}
-        x={'68%'}
-        y={20}
-        width={'30%'}
-        height={'50%'}
-        clear={true}
-      >
-        <div style={minimapBackgroundStyle} />
-      </FirstPersonView> */}
     </DeckGL>
   );
 }

@@ -46,7 +46,7 @@ export default function Panelpage() {
       }}
     >
       <SubMenu key="sub1" icon={<NodeIndexOutlined />} title="Trajectory">
-        <Menu.Item key="hourlytraj" icon={<NodeIndexOutlined />}>轨迹</Menu.Item>
+        <Menu.Item key="hourlytraj" icon={<NodeIndexOutlined />}>trajectoire</Menu.Item>
       </SubMenu>
     </Menu>
     <Button type="text" onClick={toggleCollapsed} style={{ margin: '10px 16px' }}>
