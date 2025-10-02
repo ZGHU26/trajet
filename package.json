@@ -87,5 +87,14 @@
     },
     "devDependencies": {
         "mini-css-extract-plugin": "2.4.5"
-    }
+    },
+   
+  "homepage": "https://zghu26.github.io/trajet",
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+
+    "predeploy": "yarn build",
+    "deploy": "gh-pages -d build"
+  }
 }
