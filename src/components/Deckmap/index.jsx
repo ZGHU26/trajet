@@ -196,7 +196,7 @@ export default function Deckmap() {
     data: signalPositions || [],
     getPosition: d => d.coord,
     radiusUnits: 'meters',
-    getRadius: () => 20,                  // 20 米半径（更显眼）
+    getRadius: () => 3,                  // 20 米半径（更显眼）
     radiusMinPixels: 3,
     getFillColor: [255, 0, 0, 230],
     pickable: false,
