@@ -1,5 +1,5 @@
 /* global window */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { _MapContext as MapContext, StaticMap, NavigationControl, ScaleControl } from 'react-map-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import DeckGL from '@deck.gl/react';
@@ -9,10 +9,10 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 import { TripsLayer } from '@deck.gl/geo-layers';
 import { NodeIndexOutlined } from '@ant-design/icons';
 
-// 贴路工具
+// 路网 + 仿真
 import { segmentsFromGeoJSON, simulateTripsOnRoads } from '../../utils/roadSimLite';
-// 红绿灯工具（注意：复数 signals）
-import { loadSignalsGeoJSON, buildSignalMapForNodes, isRedAt } from '../../utils/signal';
+// 红绿灯
+import { loadSignalsGeoJSON, buildSignalMapForNodes, isGreenAt } from '../../utils/signal';
 
 // redux
 import { useDispatch, useMappedState } from 'redux-react-hook';
@@ -38,7 +38,7 @@ export default function Deckmap() {
   // -------- redux --------
   const mapState = useCallback(state => ({ traj: state.traj }), []);
   const { traj } = useMappedState(mapState);
-  const { tripsinfo, play, trajlight_isshow, trajColor1, trajColor2, trailLength, trajwidth } = traj;
+  const { tripsinfo = {}, play, trajlight_isshow, trajColor1, trajColor2, trailLength, trajwidth } = traj || {};
 
   const dispatch = useDispatch();
   const setTripsinfo = (data) => dispatch(setTripsinfo_tmp(data));
@@ -79,7 +79,7 @@ export default function Deckmap() {
   const [time_here, setTime_here] = useState(0);
   const [animationSpeed, setanimationSpeed] = useState(1);
   unsubscribe('animationSpeed');
-  useSubscribe('animationSpeed', (_, data) => setanimationSpeed(data));
+  useSubscribe('animationSpeed', (_, data) => setanimationSpeed(data || 1));
 
   const animate = () => {
     setTime_here(t => {
@@ -96,7 +96,7 @@ export default function Deckmap() {
   unsubscribe('playtime');
   useSubscribe('playtime', (_, data) => {
     if (!tripsinfo || !tripsinfo.loopLength) return;
-    setTime_here(tripsinfo.loopLength * data / 100);
+    setTime_here(tripsinfo.loopLength * (data || 0) / 100);
   });
   useEffect(() => {
     if (play) animation.id = window.requestAnimationFrame(animate);
@@ -110,7 +110,7 @@ export default function Deckmap() {
   const [numCars, setNumCars] = useState(1200);
   const [durationSec, setDurationSec] = useState(360);
 
-  // 生成 key 的兜底函数（确保节点不会变成 1 个）
+  // 生成 key 的兜底函数
   const toKey = p => Array.isArray(p) ? `${p[0].toFixed(6)},${p[1].toFixed(6)}` : '';
 
   // 只加载一次
@@ -125,7 +125,7 @@ export default function Deckmap() {
         if (!mounted) return;
         setRoadSegs(segs);
 
-        // 2) 节点列表（兜底生成 key）
+        // 2) 节点列表
         const nodeMap = new Map();
         for (const s of segs) {
           const aKey = s.aKey || toKey(s.a);
@@ -139,10 +139,10 @@ export default function Deckmap() {
         let sigMap = null, sigPos = [];
         try {
           const sgj = await loadSignalsGeoJSON('/oise-signals.geojson');
-          const built = buildSignalMapForNodes(nodes, sgj, 120); // 吸附半径放大到 120m 更容易命中
+          const built = buildSignalMapForNodes(nodes, sgj, 120); // 120m 更容易命中
           sigMap = built.signalMap;
           sigPos = built.signalPositions;
-        } catch (e) {
+        } catch {
           console.warn('未找到 oise-signals.geojson，红绿灯为空');
         }
         if (!mounted) return;
@@ -169,67 +169,71 @@ export default function Deckmap() {
       durationSec: dur,
       stepSec: 1,
       signalMap: sigMapParam,
-      isRedAt
+      isGreenAt
     });
 
     setTripsinfo({
-      trips: synth.trips,
+      trips: synth.trips || [],
       starttime: synth.starttime, // 秒
       loopLength: synth.loopLength
     });
     setPlay(true);
     setshowplayinfo(true);
 
-    if (synth.trips.length > 0) {
+    if (synth.trips && synth.trips.length > 0) {
       const [lng, lat] = synth.trips[0].geometry.coordinates[0];
       setViewState(v => ({ ...v, longitude: lng, latitude: lat, zoom: 10 }));
     }
   }, [roadSegs, numCars, durationSec, signalMap, setTripsinfo, setPlay, setshowplayinfo]);
-// 轨迹显隐开关（默认显示）
- const [trajlayer_isshow, settrajlayer_isshow] = useState(true);
+
+  // 轨迹显隐开关（默认显示）
+  const [trajlayer_isshow] = useState(true);
 
   // -------- 图层 --------
-  // 用红点显示红绿灯位置
-  const signalsLayer = new ScatterplotLayer({
+  // 红绿灯位置（20 米半径）
+  const signalsLayer = useMemo(() => new ScatterplotLayer({
     id: 'traffic-signals-red-dots',
-    data: signalPositions,                 // [{ id, coord:[lng,lat] }]
+    data: signalPositions || [],
     getPosition: d => d.coord,
     radiusUnits: 'meters',
-    getRadius: () => 8,                   // 20 米半径
-    radiusMinPixels: 3,                    // 最小像素半径，避免太小看不见
-    getFillColor: [255, 0, 0, 230],        // 红色
+    getRadius: () => 20,                  // 20 米半径（更显眼）
+    radiusMinPixels: 3,
+    getFillColor: [255, 0, 0, 230],
     pickable: false,
     visible: true
-  });
+  }), [signalPositions]);
 
-  const layers = [
-    new TripsLayer({
-      id: 'trips-core',
-      data: tripsinfo.trips,
-      getPath: d => d.geometry.coordinates,
-      getTimestamps: d => d.properties.timestamp, // 秒
-      getColor: trajColor1.slice(0, 3),
-      opacity: 0.8,
-      widthMinPixels: Math.max(1, trajwidth || 1),
-      trailLength: Math.max(10, trailLength || 60),
-      currentTime: time_here, // 秒
-      shadowEnabled: false,
-      visible: true
-    }),
-    trajlayer_isshow && trajlight_isshow ? new TripsLayer({
+  const tripsCore = useMemo(() => new TripsLayer({
+    id: 'trips-core',
+    data: (tripsinfo && tripsinfo.trips) ? tripsinfo.trips : [],
+    getPath: d => d.geometry.coordinates,
+    getTimestamps: d => d.properties.timestamp, // 秒
+    getColor: (trajColor1 || [66, 135, 245, 255]).slice(0, 3),
+    opacity: 0.8,
+    widthMinPixels: Math.max(1, trajwidth || 1),
+    trailLength: Math.max(10, trailLength || 60),
+    currentTime: time_here, // 秒
+    shadowEnabled: false,
+    visible: true
+  }), [tripsinfo, trajColor1, trajwidth, trailLength, time_here]);
+
+  const tripsGlow = useMemo(() => {
+    if (!(trajlayer_isshow && trajlight_isshow)) return null;
+    return new TripsLayer({
       id: 'trips-glow',
-      data: tripsinfo.trips,
+      data: (tripsinfo && tripsinfo.trips) ? tripsinfo.trips : [],
       getPath: d => d.geometry.coordinates,
       getTimestamps: d => d.properties.timestamp,
-      getColor: trajColor2.slice(0, 3),
+      getColor: (trajColor2 || [66, 135, 245, 255]).slice(0, 3),
       opacity: 0.15,
       widthMinPixels: 6 * Math.max(1, trajwidth || 1),
       trailLength: Math.max(10, trailLength || 60),
       currentTime: time_here,
       shadowEnabled: false
-    }) : null,
-    signalsLayer
-  ].filter(Boolean);
+    });
+  }, [tripsinfo, trajlight_isshow, trajColor2, trajwidth, trailLength, time_here, trajlayer_isshow]);
+
+  const layers = useMemo(() => [tripsCore, tripsGlow, signalsLayer].filter(Boolean), [tripsCore, tripsGlow, signalsLayer]);
 
   // -------- 控件 --------
   const Controls = (
@@ -268,6 +272,7 @@ export default function Deckmap() {
       <MapView id="baseMap" controller={true} height="100%">
         <StaticMap
           reuseMaps
+          // 你的 react-map-gl 若提示属性名变更，再把下一行替换为 mapboxAccessToken
           mapboxApiAccessToken={MAPBOX_ACCESS_TOKEN}
           mapStyle={`mapbox://styles/mapbox/${mapStyle}`}
           preventStyleDiffing={true}
