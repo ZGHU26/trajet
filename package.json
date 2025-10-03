@@ -91,17 +91,20 @@
     
  "homepage": "https://zghu26.github.io/trajet",
 
-  "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "postbuild": "shx cp build/index.html build/404.html",
-    "predeploy": "yarn build",
-    "deploy": "gh-pages -d build"
-  },
+"scripts": {
+  "start": "react-app-rewired start",
+  "build": "react-app-rewired build",
+  "postbuild": "shx cp build/index.html build/404.html",
+  "predeploy": "yarn build",
+  "deploy": "gh-pages -d build"
+},
+"devDependencies": {
+  "gh-pages": "^6.1.1",
+  "shx": "^0.3.4",
+  "react-app-rewired": "^2.2.1",
+  "customize-cra": "^1.0.0"
+}
 
-  "devDependencies": {
-    "gh-pages": "^6.1.1",
-    "shx": "^0.3.4"
-  }
 
+  
 }

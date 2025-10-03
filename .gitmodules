@@ -1,0 +1,3 @@
+[submodule "my-app"]
+  path = my-app
+  url = https://github.com/zghu26/trajet.git
